@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Defaults (likely globally)
+: "${VAULT_ADDR:?Must supply a Vault address}"
+: "${VAULT_TOKEN:?Must supply a Vault token}"
+
+# Args
+: "${VAULT_FQDN:?Give the fully-qualified domain name for the Vault load balancer}"
+: "${ACCOUNTS_MANIFEST_FILE:?Give the path to a file containing a line-delimited list of AWS account numbers, indicating target AWS accounts from which auth will be supported}"
+: "${VAULT_AWS_AUTH_PATH:=auth/aws}"
+: "${VAULT_AWS_AUTH_TARGET_ROLE_NAME:=VaultAuth}"
+
+while read -r line; do
+  if [ -z "${line}" ]; then continue; fi
+  if grep -qFe '^ *#' <<<"$line" >/dev/null 2>&1; then continue; fi
+
+  account_num="${line// /}"
+  json="$(printf '{"sts_role": "arn:aws:iam::%s:role/%s", "external_id": "%s"}' "$account_num" "${VAULT_AWS_AUTH_TARGET_ROLE_NAME}" "${VAULT_FQDN}")"
+
+  curl --show-error --silent --fail \
+    --request POST \
+    --header "X-Vault-Token: ${VAULT_TOKEN}" \
+    --header "Content-Type: application/json" \
+    --data "$json" \
+    "${VAULT_ADDR}/v1/${VAULT_AWS_AUTH_PATH}/config/sts/${account_num}"
+done <"${ACCOUNTS_MANIFEST_FILE}"

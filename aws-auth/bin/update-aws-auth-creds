@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Baseline connection info
+: "${VAULT_ADDR:?Missing the Vault address}"
+: "${VAULT_TOKEN:?Missing the Vault token}"
+
+# Args
+: "${AWS_ACCESS_KEY_ID:?Missing access key}"
+: "${AWS_SECRET_ACCESS_KEY:?Missing secret key}"
+: "${VAULT_AWS_AUTH_PATH:=auth/aws}"
+
+curl --show-error --fail --silent \
+  --request POST \
+  --header "X-Vault-Token: ${VAULT_TOKEN}" \
+  --header "Content-Type: application/json" \
+  --data "$(printf '{"access_key": "%s", "secret_key": "%s"}' "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY")" \
+  "${VAULT_ADDR}/v1/${VAULT_AWS_AUTH_PATH}/config/client"
+
+printf 'INFO: %s\n' 'AWS credentials have been set'
+
+curl --show-error --fail --silent \
+  --request POST \
+  --header "X-Vault-Token: ${VAULT_TOKEN}" \
+  --header "Content-Type: application/json" \
+  --data "$(printf '{"access_key": "%s", "secret_key": "%s"}' "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY")" \
+  "${VAULT_ADDR}/v1/${VAULT_AWS_AUTH_PATH}/config/rotate-root"
+
+printf 'INFO: %s\n' 'AWS credentials have been rotated'
