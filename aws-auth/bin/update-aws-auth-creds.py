@@ -68,7 +68,7 @@ async def main() -> None:
         ).raise_for_status()
         log.info("Updated AWS client with new, user-supplied access keys")
 
-        http.post(f"/{args.auth_mount}/config/client/rotate-root").raise_for_status()
+        http.post(f"/{args.auth_mount}/config/rotate-root").raise_for_status()
         log.info(
             "Rotated user-supplied access keys for zero-knowledge AWS client credentials"
         )
