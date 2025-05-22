@@ -1,8 +1,44 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if ((BASH_VERSINFO[0] < 4)); then
+  printf 'ERROR: This script requires a Bash version >= 4.0 to execute.\n' >&2
+  exit 1
+fi
+
 declare -a _curl_flags
 _curl_flags=(--fail --show-error --silent)
+
+log_msg() {
+  printf '%s\n' "$*" >&2
+}
+
+display_vault_warnings() {
+  local pythonscript
+  pythonscript="$(
+    cat <<'SCRIPT'
+import json
+import sys
+
+def print_msgs(level, msgs):
+    for msg in msgs:
+        sys.stderr.write("{}: {}\n\n".format(
+          level.upper(),
+          msg,
+        ))
+
+
+obj = json.loads(sys.argv[1])
+if 'warnings' in obj and isinstance(list, obj['warnings']):
+    print_msgs('WARNING', obj['warnings'])
+if 'errors' in obj and isinstance(list, obj['errors']):
+    print_msgs('ERROR', obj['errors'])
+    sys.exit(1)
+SCRIPT
+  )"
+
+  python3 -c "$pythonscript" "$1"
+}
 
 env_var_or_prompt() {
   local var_name
@@ -18,12 +54,10 @@ env_var_or_prompt() {
 }
 
 pause() {
-  local msg
-  msg="Press [ENTER] to continue, [Ctrl-C] to abort"
   if [ -n "${1:-}" ]; then
-    msg="$*\n${msg}"
+    printf '%s\n' "${1}" >&2
   fi
-  read -p "$msg" -s -r _
+  read -p 'Press [ENTER] to continue, [Ctrl-C] to abort' -s -r _
   printf '\n'
 }
 
@@ -48,7 +82,7 @@ _target_var() {
   printf '%s\n' "${!var}"
 }
 vault_api_anon() {
-  local target method uri_path addr flags
+  local target method uri_path addr flags resp exitcode
   target="$1"
   method="$2"
   addr="$(_target_var "$target" VAULT_ADDR)"
@@ -66,10 +100,17 @@ vault_api_anon() {
     )
   fi
 
-  curl "${flags[@]}" "${addr}/v1/${uri_path}"
+  set +e
+  resp="$(curl "${flags[@]}" "${addr}/v1/${uri_path}")"
+  exitcode=$?
+  set -e
+  if [ -n "$resp" ]; then
+    display_vault_warnings "$resp"
+  fi
+  return $exitcode
 }
 vault_api() {
-  local target method uri_path addr flags
+  local target method uri_path addr flags resp exitcode
   target="$1"
   method="$2"
   addr="$(_target_var "$target" VAULT_ADDR)"
@@ -88,7 +129,14 @@ vault_api() {
     )
   fi
 
-  curl "${flags[@]}" "${addr}/v1/${uri_path}"
+  set +e
+  resp="$(curl "${flags[@]}" "${addr}/v1/${uri_path}")"
+  exitcode=$?
+  set -e
+  if [ -n "$resp" ]; then
+    display_vault_warnings "$resp"
+  fi
+  return $exitcode
 }
 
 check_is_unsealed() {
@@ -189,7 +237,7 @@ assert_dr_secondary() {
 }
 
 check_dr_replication_license() {
-  vault_api "$1" GET /sys/license/status | jq -e '.data.autoloaded.features[] | contains("DR Replication")' >/dev/null
+  vault_api "$1" GET /sys/license/status | jq -e '[.data.autoloaded.features[] | select(. == "DR Replication")] | any' >/dev/null
 }
 assert_dr_replication_license() {
   if ! check_dr_replication_license "$1"; then
@@ -234,7 +282,7 @@ enable_dr_secondary_replication() {
 
   pause "Accept the invitation to join?"
   vault_api secondary POST /sys/replication/dr/secondary/enable "$(jq --null-input --arg token "$JOIN_TOKEN" '{"token": $token}')"
-  log_msg "Invitation has been accepted. ${VAULT_ADDR_secondary} is now replicating data from ${VAULT_ADDR_primary}"
+  printf 'Invitation has been accepted. %s is now replicating data from %s\n' "${VAULT_ADDR_secondary}" "${VAULT_ADDR_primary}"
   unset JOIN_TOKEN
 }
 
@@ -288,7 +336,7 @@ check_dr_secondary_is_connected() {
     # way, the desired secondary is not currently configured as a secondary on this cluster.
     return 1
   fi
-  if ! jq --arg ident "$VAULT_SECONDARY_IDENTIFIER" -e '.data.known_secondaries[] | contains($ident)' <<<"$resp" >/dev/null; then
+  if ! jq --arg ident "$VAULT_SECONDARY_IDENTIFIER" -e '[.data.known_secondaries[] | select(. == $ident)] | any' <<<"$resp" >/dev/null; then
     return 1
   fi
 }
@@ -319,28 +367,73 @@ assert_has_command jq
 assert_has_command curl
 assert_has_command nc netcat
 assert_has_command python3 # Only need what's in the standard library
-pause ""
+pause
 
-# shellcheck disable=SC2034
-VAULT_ADDR_primary="$(env_var_or_prompt VAULT_ADDR_primary)"
-# shellcheck disable=SC2034
-VAULT_TOKEN_primary="$(env_var_or_prompt VAULT_TOKEN_primary)"
-# shellcheck disable=SC2034
-VAULT_ADDR_secondary="$(env_var_or_prompt VAULT_ADDR_secondary)"
-# shellcheck disable=SC2034
-VAULT_TOKEN_secondary="$(env_var_or_prompt VAULT_TOKEN_secondary)"
-# shellcheck disable=SC2034
-VAULT_SECONDARY_IDENTIFIER="$(env_var_or_prompt VAULT_SECONDARY_IDENTIFIER)"
+if [ -z "${VAULT_ADDR_primary:-}" ] || [ -z "${VAULT_TOKEN_primary:-}" ]; then
+  msg="$(
+    cat <<'EOH'
+This section will prompt you for the Vault API information of the Disaster Recovery (DR) PRIMARY cluster.
 
-# NOTE: In DR replication, this is fine. In performance replication, we want a DNS entry
-# that would always be assigned to the DR primary cluster, even during failover.
-VAULT_CLUSTER_ADDR_primary="$(transform_to_cluster_addr "${VAULT_ADDR_primary}")"
+Please remember that in a DR replication relationship, the DR secondary cluster is receiving live updates
+from the primary, but is NOT able to be used until explicitly told the primary cluster is offline and that
+the DR secondary should take over for it. Do not expect to use the DR secondary cluster while it remains
+in this "secondary" state.
+EOH
+  )"
+  log_msg "$msg"
+  VAULT_ADDR_primary="$(env_var_or_prompt VAULT_ADDR_primary)"
+  VAULT_TOKEN_primary="$(env_var_or_prompt VAULT_TOKEN_primary)"
+fi
+if [ -z "${VAULT_ADDR_secondary:-}" ] || [ -z "${VAULT_TOKEN_secondary:-}" ]; then
+  msg="$(
+    cat <<'EOH'
+This section will prompt you for the Vault API information of the Disaster Recovery (DR) SECONDARY cluster.
+
+Often the DR Secondary cluster is freshly initialized and unconfigured. As such, using its root token during 
+this process of setting it up as a DR secondary cluster is a standard practice. All data in this cluster will 
+be ERASED once is becomes a DR secondary, and any attempts to use it will be met with redirects to the DR
+Primary cluster or blatant error messages.
+EOH
+  )"
+  log_msg "$msg"
+  VAULT_ADDR_secondary="$(env_var_or_prompt VAULT_ADDR_secondary)"
+  VAULT_TOKEN_secondary="$(env_var_or_prompt VAULT_TOKEN_secondary)"
+fi
+
+if [ -z "${VAULT_SECONDARY_IDENTIFIER:-}" ]; then
+  msg="$(
+    cat <<'EOH'
+When registering the DR secondary cluster with the DR primary, this is the identifier that will be used to
+represent the connection. It is recommended to use the collective name of the DR Secondary Vault cluster,
+often set as the `cluster_name` attribute in one of the Vault config files on the server nodes (i.e., in 
+one of '/etc/vault.d/*.hcl').
+
+Example: vault-chimp
+EOH
+  )"
+  log_msg "$msg"
+  VAULT_SECONDARY_IDENTIFIER="$(env_var_or_prompt VAULT_SECONDARY_IDENTIFIER)"
+fi
+
+if [ -z "${VAULT_CLUSTER_ADDR_primary:-}" ]; then
+  msg="$(
+    cat <<'EOH'
+Please include the cluster address (e.g., 'https://vault.example.com:8201') for the DR Primary cluster, if routing replication traffic through a load balancer (recommended).
+
+If you are okay with members of the DR secondary cluster directly communicating with members of the DR primary cluster, please leave this blank.
+EOH
+  )"
+  log_msg "$msg"
+  VAULT_CLUSTER_ADDR_primary="$(env_var_or_prompt VAULT_CLUSTER_ADDR_primary)"
+fi
 
 log_msg 'Preflight Check: Ensuring both clusters have expected levels of connectivity'
 
 assert_is_listening "${VAULT_ADDR_primary}"
 assert_is_listening "${VAULT_ADDR_secondary}"
-assert_is_listening "${VAULT_CLUSTER_ADDR_primary}"
+if [ -n "${VAULT_CLUSTER_ADDR_primary:-}" ]; then
+  assert_is_listening "${VAULT_CLUSTER_ADDR_primary}"
+fi
 
 log_msg 'Preflight Check: Ensuring both clusters are initialized and unsealed'
 
@@ -432,7 +525,6 @@ EOH
   enable_dr_primary_replication
 fi
 
-# TODO: enable DR secondary
 enable_dr_secondary_replication
 
 log_msg "Disaster Recovery replication connection has been established. Data is being fully replicated to the DR secondary and may take several minutes. To monitor progress, see the Vault Web UI at ${VAULT_ADDR_secondary}"
