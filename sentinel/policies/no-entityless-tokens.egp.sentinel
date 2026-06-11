@@ -1,0 +1,20 @@
+blocked_create_orphan_endpoint = rule when request.path matches "^(.*)auth\\/token\\/create-orphan$" {
+  false
+}
+
+blocked_create_token_with_no_parent = rule when request.path matches "^(.*)auth\\/token\\/create$" {
+  not ("no_parent" in keys(request.data) and request.data.no_parent is "true")
+}
+
+blocked_create_token_role_with_orphan = rule when request.path matches "^(.*)auth\\/token\\/role\\/(.*)$" {
+  not (request.operation in ["create", "update"] and
+    ("orphan" in keys(request.data) and request.data.orphan is "true"))
+}
+
+// Vault Enterprise licensing counts each token that is not tied to an entity (except the root token) as a discrete "Client"
+main = rule {
+  blocked_create_orphan_endpoint and
+  blocked_create_token_with_no_parent and
+  blocked_create_token_role_with_orphan and
+  true
+}

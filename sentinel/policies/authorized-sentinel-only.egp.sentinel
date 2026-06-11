@@ -1,0 +1,22 @@
+import "strings"
+
+EXEMPT_NAMESPACES = [
+	# List of exact Vault Namespace paths (must always end in `/`) which are allowed to ignore this rule
+	"", # root namespace (must never end in `/`)
+	"admin/",
+]
+
+debug_info = func() {
+	print("Namespace ID:", namespace.id)
+	print("Namespace Path:", namespace.path)
+	print("Request Path:", request.path)
+	print("Operation:", request.operation)
+	return true
+}
+
+is_sentinel_write = request.operation in ["create", "update"] and (strings.has_prefix(request.path, "sys/policies/egp/") or strings.has_prefix(request.path, "sys/policies/rgp/"))
+
+# Only Vault Platform Administrators are permitted to modify Sentinel policies
+main = rule when is_sentinel_write {
+	debug_info() and namespace.path in EXEMPT_NAMESPACES
+}

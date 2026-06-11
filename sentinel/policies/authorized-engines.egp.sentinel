@@ -1,0 +1,61 @@
+import "strings"
+
+EXEMPT_NAMESPACES = [
+	# List of exact Vault Namespaces (must always end in `/`) which are allowed to ignore this allowlist
+	"admin/",
+	"admin/fizz-buzz/",
+]
+
+debug_info = func() {
+	print("Namespace ID:", namespace.id)
+	print("Namespace Path:", namespace.path)
+	print("Request Path:", request.path)
+	print("Operation:", request.operation)
+	return true
+}
+
+is_exempt = func() {
+	if namespace.path in EXEMPT_NAMESPACES {
+		return true
+	}
+	// TODO: Any other conditions under which this policy should be skipped
+
+	return false
+}
+
+is_mounting_secrets_engine = strings.has_prefix(request.path, "sys/mounts/") and request.operation == "update" and not strings.has_suffix(request.path, "/tune")
+is_mounting_auth_engine = strings.has_prefix(request.path, "sys/auth/") and request.operation == "update" and not strings.has_suffix(request.path, "/tune")
+
+secrets_engines_allowlist = rule when is_mounting_secrets_engine {
+	debug_info() and request.data.type in [
+		"kv-v2", # For simplicity, still block `kv` despite `{"type": "kv", "options": {"version": 2}}` resulting in a KV v2 engine too.
+		"aws",
+		"database",
+	]
+}
+auth_engines_allowlist = rule when is_mounting_auth_engine {
+	debug_info() and request.data.type in [
+		"approle",
+		"aws",
+		"jwt",
+		"kubernetes",
+	]
+}
+
+# Not all features of Vault are authorized for use in this enterprise. Please contact your platform administrator if you have questions.
+#
+# Secrets engines:
+# - kv-v2
+# - aws
+# - database
+#
+# Auth engines:
+# - approle
+# - aws
+# - jwt
+# - kubernetes
+main = rule when is_mounting_secrets_engine or is_mounting_auth_engine {
+	(auth_engines_allowlist and secrets_engines_allowlist) or is_exempt()
+}
+
+# vim: ft=hcl
