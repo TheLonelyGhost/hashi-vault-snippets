@@ -1,0 +1,133 @@
+# Sentinel policy CI workflow
+#
+# Runs on every pull request to validate Sentinel policy tests and preview
+# the Terraform plan against the sandbox Vault environment.
+#
+# On merge to main, deploys to sandbox automatically, then gates production
+# deployment behind a manual approval step.
+#
+# ─── Sentinel CLI version ────────────────────────────────────────────────────
+# Pin the Sentinel CLI version to match the version embedded in the target
+# Vault Enterprise release. To find the embedded Sentinel version:
+#   1. Go to https://developer.hashicorp.com/vault/docs/release-notes
+#   2. Find the Vault Enterprise version in use
+#   3. Look for "Sentinel <version>" in the changelog or dependency list
+#
+# Alternatively, check the Vault Enterprise release artifact SHA256SUMS for
+# the bundled sentinel binary version.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Sentinel Policies
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "sentinel/**"
+  push:
+    branches:
+      - main
+    paths:
+      - "sentinel/**"
+
+jobs:
+  sentinel-test:
+    name: sentinel test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Sentinel CLI
+        env:
+          # Pin to the Sentinel version embedded in your target Vault Enterprise
+          # release. See release notes URL in the comment at the top of this file.
+          SENTINEL_VERSION: "0.28.1"
+        run: |
+          curl -fsSL \
+            "https://releases.hashicorp.com/sentinel/${SENTINEL_VERSION}/sentinel_${SENTINEL_VERSION}_linux_amd64.zip" \
+            -o sentinel.zip
+          unzip sentinel.zip
+          sudo install -m 0755 sentinel /usr/local/bin/sentinel
+          sentinel version
+
+      - name: Run sentinel test
+        working-directory: sentinel
+        run: sentinel test policies/
+
+  terraform-plan-sandbox:
+    name: terraform plan (sandbox)
+    runs-on: ubuntu-latest
+    needs: sentinel-test
+    if: github.event_name == 'pull_request'
+    env:
+      TF_VAR_vault_address: ${{ secrets.SANDBOX_VAULT_ADDR }}
+      TF_VAR_vault_token: ${{ secrets.SANDBOX_VAULT_TOKEN }}
+      TF_VAR_enforcement_level: "soft-mandatory"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.10"
+
+      - name: terraform init
+        working-directory: sentinel/examples/terraform
+        run: terraform init
+
+      - name: terraform plan
+        working-directory: sentinel/examples/terraform
+        run: terraform plan -no-color
+        continue-on-error: false
+
+  terraform-apply-sandbox:
+    name: terraform apply (sandbox)
+    runs-on: ubuntu-latest
+    needs: sentinel-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    env:
+      TF_VAR_vault_address: ${{ secrets.SANDBOX_VAULT_ADDR }}
+      TF_VAR_vault_token: ${{ secrets.SANDBOX_VAULT_TOKEN }}
+      TF_VAR_enforcement_level: "soft-mandatory"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.10"
+
+      - name: terraform init
+        working-directory: sentinel/examples/terraform
+        run: terraform init
+
+      - name: terraform apply
+        working-directory: sentinel/examples/terraform
+        run: terraform apply -auto-approve -no-color
+
+  terraform-apply-production:
+    name: terraform apply (production)
+    runs-on: ubuntu-latest
+    needs: terraform-apply-sandbox
+    # The "production" environment must be configured in GitHub repository
+    # Settings → Environments → production with required reviewers set.
+    # The job will pause here until an authorized reviewer approves.
+    environment: production
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    env:
+      TF_VAR_vault_address: ${{ secrets.PROD_VAULT_ADDR }}
+      TF_VAR_vault_token: ${{ secrets.PROD_VAULT_TOKEN }}
+      TF_VAR_enforcement_level: "hard-mandatory"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.10"
+
+      - name: terraform init
+        working-directory: sentinel/examples/terraform
+        run: terraform init
+
+      - name: terraform apply
+        working-directory: sentinel/examples/terraform
+        run: terraform apply -auto-approve -no-color
