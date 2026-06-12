@@ -14,7 +14,7 @@ adds latency that may be unacceptable for runtime secret fetches.
 | **Bound to** | Tokens, entities, groups | URI path globs | Tokens, entities, groups |
 | **Sentinel logic?** | No | Yes | Yes |
 | **Performance** | Fastest | Slowest | Slow |
-| **Typical use** | "Can this identity read this path?" | "Nobody can do X at this path" | "Entities with metadata Y must satisfy Z" |
+| **Typical use** | "Can this identity read this path?" | "Nobody can do X at this path" | "Apply these boundaries to already-assigned, ACL-granted permissions" |
 
 For background, see the [HashiCorp developer docs](https://developer.hashicorp.com/vault/docs/enterprise/sentinel).
 
@@ -23,6 +23,29 @@ For background, see the [HashiCorp developer docs](https://developer.hashicorp.c
 `policies/` contains files named `<purpose>.egp.sentinel` or `<purpose>.rgp.sentinel`.
 Tests live under `policies/test/`, with one subdirectory per policy (named after
 the policy file, minus `.sentinel`) and shared mock globals under `policies/test/mocks/`.
+
+```
+examples/
+├── github-workflows/
+└── terraform/
+policies/
+├── <policy>.egp.sentinel
+├── <other>.rgp.sentinel
+├── ...
+└── test/
+    ├── <policy>.egp/                   # policy filename without `.sentinel`
+    │   ├── fail-<scenario>.hcl
+    │   ├── pass-<scenario>.hcl
+    │   └── ...
+    ├── <other>.rgp/
+    │   ├── fail-<scenario>.hcl
+    │   ├── pass-<scenario>.hcl
+    │   └── ...
+    └── mocks/
+        ├── <module>-<identifier>.hcl    # module being one of `identity`, `namespace`, ...
+        └── ...
+
+```
 
 ## Prerequisites
 
